@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-driver_business_quickstats_mix_v2.py
+driver_business_quickstats_mix_v2_optimized.py
 ---------------------------------
-融合原字段+正则+LLM结构化，业务类型标准化归并，多维度统计，自动美化Excel。
+区域/流向归一正则+LLM+缓存，详细日志。
 """
+
 import os
 import re
 import sys
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 import pandas as pd
@@ -17,37 +19,87 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.utils import get_column_letter
 import logging
 
-# ——— 日志配置 ———
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S",
-                    handlers=[logging.StreamHandler(sys.stderr)])
+# ===== 日志配置 =====
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stderr)]
+)
 
-# ——— 环境与Key ———
+# ===== 环境与Key =====
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
-logging.info(f"Using API Key: {openai.api_key}")
+MODEL = "gpt-3.5-turbo"
 
-# ——— 路径配置 ———
+# ===== 路径配置 =====
 BASE_DIR = Path(r"E:\kabuda_data_analysis\司机业务信息库")
 CSV = BASE_DIR / "司机业务.csv"
 XLSX = BASE_DIR / "司机业务.xlsx"
 XLSX_OUT = BASE_DIR / "司机业务_统计分析.xlsx"
-MODEL = "gpt-3.5-turbo"
+CACHE_PATH = BASE_DIR / "area_normalize_cache.json"
 
-# ——— 1. 读取数据 ———
+# ===== 数据读取 =====
 if CSV.exists():
     df = pd.read_csv(CSV, dtype=str)
 elif XLSX.exists():
     df = pd.read_excel(XLSX, sheet_name=0, dtype=str)
 else:
     raise FileNotFoundError("未找到司机业务.csv或司机业务.xlsx")
-df = df.fillna("")  # 防止空值报错
+df = df.fillna("")
 logging.info(f"读取数据，行数: {len(df)}")
 
-# ——— 2. 结构化提取“订单概述”主要字段 ———
+# ===== 区域归一：正则/手工映射 + LLM + 缓存 =====
+AREA_MAP = {
+    "Toronto": "多伦多", "多伦多": "多伦多", "toronto": "多伦多",
+    "North York": "北约克", "北约克": "北约克", "northyork": "北约克",
+    "Scarborough": "士嘉堡", "士嘉堡": "士嘉堡", "scarborough": "士嘉堡",
+    "Markham": "万锦", "万锦": "万锦", "markham": "万锦",
+    "Richmond Hill": "列治文山", "列治文山": "列治文山",
+    "Mississauga": "密西沙加", "密西沙加": "密西沙加",
+    "Etobicoke": "怡陶碧谷", "皮尔逊": "皮尔逊机场", "Pearson": "皮尔逊机场", "机场": "皮尔逊机场"
+}
+if CACHE_PATH.exists():
+    with open(CACHE_PATH, "r", encoding="utf-8") as f:
+        area_cache = json.load(f)
+else:
+    area_cache = {}
+
+def normalize_area(text, biz_type="未知", log_prefix=""):
+    """标准化单个地点字符串，自动日志输出"""
+    orig_text = text.strip()
+    # 先查映射
+    for k, v in AREA_MAP.items():
+        if k.lower() in orig_text.lower():
+            norm = v
+            break
+    else:
+        # 查缓存
+        if orig_text in area_cache:
+            norm = area_cache[orig_text]
+        else:
+            # LLM归一
+            try:
+                prompt = f"请将下述地址归一化为GTA地区常见的行政区名（如多伦多、北约克、士嘉堡、万锦、列治文山、密西沙加、皮尔逊机场等），仅返回地名，不加其它：\n{orig_text}"
+                resp = openai.chat.completions.create(
+                    model=MODEL,
+                    messages=[{"role": "system", "content": prompt}],
+                    temperature=0, max_tokens=8)
+                norm = resp.choices[0].message.content.strip().replace("。", "")
+                norm = norm if norm else orig_text
+                area_cache[orig_text] = norm
+                with open(CACHE_PATH, "w", encoding="utf-8") as f:
+                    json.dump(area_cache, f, ensure_ascii=False, indent=2)
+                logging.info(f"{log_prefix}LLM归一: 原始:「{orig_text}」→ 归一:「{norm}」| 业务类型: {biz_type}")
+            except Exception as e:
+                logging.error(f"{log_prefix}LLM归一失败: {e}")
+                norm = orig_text
+    if not log_prefix.startswith("[Flow]"):  # 避免流向日志太多
+        logging.info(f"{log_prefix}区域归一: 原始:「{orig_text}」→ 归一:「{norm}」| 业务类型: {biz_type}")
+    return norm
+
+# ====== 结构化“订单概述”主要字段（原正则+LLM补齐）======
 def extract_info(text):
-    logging.info(f"[Regex] Processing text: {text}")
     # 业务类型
     if re.search(r"接机|送机", text):
         type_ = "接送机"
@@ -63,7 +115,7 @@ def extract_info(text):
         type_ = "代办/其它"
     else:
         type_ = ""
-    # 区域判定
+    # 区域判定（先粗取）
     area_match = re.search(
         r"多伦多|Toronto|皮尔逊|Markham|Richmond Hill|万锦|Scarborough|士嘉堡|约克|North York|Etobicoke|密西沙加|Mississauga|机场",
         text, re.I)
@@ -84,7 +136,6 @@ def extract_info(text):
         r"(\d{1,2}[:：]\d{2}\s*(?:AM|PM|am|pm)?)|(\d{1,2}点半?)|(\d{1,2}/\d{1,2}\s*\d{1,2}[:：]\d{2})|(?:上午|下午|中午)\s*\d{1,2}[:：]?\d{0,2}",
         text)
     time_ = time_match.group(0) if time_match else ""
-    logging.info(f"[Regex] Result -> type:{type_}, area:{area_}, amount:{amount}, start:{start}, end:{end}, time:{time_}")
     return {
         "业务类型_struct": type_,
         "区域_struct": area_,
@@ -95,23 +146,18 @@ def extract_info(text):
     }
 
 extract_results = df["订单概述"].apply(extract_info).apply(pd.Series)
-
-# ——— 只对正则没命中的部分，用LLM补齐 ———
-to_llm_idx = extract_results[(extract_results["业务类型_struct"] == "") |
-                             (extract_results["区域_struct"] == "")].index
+to_llm_idx = extract_results[(extract_results["业务类型_struct"] == "") | (extract_results["区域_struct"] == "")].index
 llm_targets = df.loc[to_llm_idx, "订单概述"].tolist()
-logging.info(f"Need LLM补全的行数: {len(to_llm_idx)}")
 
 def llm_extract(batch):
-    logging.info(f"[LLM] Processing batch of size {len(batch)}")
-    prompt = (
-        "你是业务归类助手，请仅输出如下格式：\n"
-        "业务类型: <类型>\n区域: <区域>\n"
-        "只允许返回两行，不加其它文字。"
-    )
     out = []
     for text in batch:
-        logging.info(f"[LLM] Input text: {text}")
+        logging.info(f"[LLM-Extract] 原文: {text}")
+        prompt = (
+            "你是业务归类助手，请仅输出如下格式：\n"
+            "业务类型: <类型>\n区域: <区域>\n"
+            "只允许返回两行，不加其它文字。"
+        )
         try:
             resp = openai.chat.completions.create(
                 model=MODEL,
@@ -119,19 +165,20 @@ def llm_extract(batch):
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": text},
                 ],
-                temperature=0.0,
-                max_tokens=30,
+                temperature=0.0, max_tokens=30,
             )
             ans = resp.choices[0].message.content.strip()
-            logging.info(f"[LLM] Output: {ans}")
             t = re.search(r"业务类型[:：]\s*(\S+)", ans)
             a = re.search(r"区域[:：]\s*(\S+)", ans)
+            biz = t.group(1) if t else ""
+            area = a.group(1) if a else ""
+            logging.info(f"[LLM-Extract] 归一结果: 业务类型: {biz}, 区域: {area}")
             out.append({
-                "业务类型_struct": t.group(1) if t else "",
-                "区域_struct": a.group(1) if a else ""
+                "业务类型_struct": biz,
+                "区域_struct": area
             })
         except Exception as e:
-            logging.error(f"[LLM] call failed: {e}")
+            logging.error(f"[LLM-Extract] call failed: {e}")
             out.append({"业务类型_struct": "", "区域_struct": ""})
     return pd.DataFrame(out)
 
@@ -140,18 +187,32 @@ if llm_targets:
     llm_out = pd.concat([llm_extract(b) for b in batches], ignore_index=True)
     extract_results.loc[to_llm_idx, ["业务类型_struct", "区域_struct"]] = llm_out.values
 
-# ——— 合并到原df ———
+# 合并回df
 for col in extract_results.columns:
     df[col] = extract_results[col]
-logging.info("字段合并完毕。")
+
+# ===== 区域归一：应用于所有相关字段 =====
+df["区域归一"] = [
+    normalize_area(area, biz_type=biz, log_prefix="[区域分布] ")
+    for area, biz in zip(df["区域_struct"], df["业务类型_struct"])
+]
+
+# ====== 起点/终点归一（流向用）======
+df["起点归一"] = [
+    normalize_area(addr, biz_type=biz, log_prefix="[Flow-起点] ")
+    for addr, biz in zip(df["起点"], df["业务类型_struct"])
+]
+df["终点归一"] = [
+    normalize_area(addr, biz_type=biz, log_prefix="[Flow-终点] ")
+    for addr, biz in zip(df["终点"], df["业务类型_struct"])
+]
 
 # ========== 字段融合 ==========
+
 df["业务类型_结构化"] = df["业务类型_struct"]
 if "订单类型" in df.columns:
     df.loc[df["业务类型_结构化"] == "", "业务类型_结构化"] = df["订单类型"]
-# 大类取订单类型
 df["业务类型_大类"] = df.get("订单类型", "")
-logging.info("字段融合完毕。")
 
 # ========== 统计分析Sheet生成 ==========
 
@@ -173,11 +234,10 @@ vc = df["业务类型_大类"].value_counts(dropna=False).reset_index()
 vc.columns = ["业务类型", "数量"]
 report_tables["业务类型分布"] = vc
 
-# 3. 区域分布
-if "区域_struct" in df.columns:
-    vc = df["区域_struct"].value_counts(dropna=False).reset_index()
-    vc.columns = ["区域_struct", "数量"]
-    report_tables["区域分布"] = vc
+# 3. 区域分布（归一化后）
+vc = df["区域归一"].value_counts(dropna=False).reset_index()
+vc.columns = ["区域", "数量"]
+report_tables["区域分布"] = vc
 
 # 4. 金额区间分布
 for col in ["金额_struct", "订单金额", "金额"]:
@@ -236,10 +296,9 @@ for col in ["司机", "司机姓名", "司机ID"]:
         report_tables["司机分布"] = vc
         break
 
-# 10. 起点终点流向分析
-if "起点" in df.columns and "终点" in df.columns:
-    flow = df.groupby(["起点", "终点"]).size().reset_index(name="订单数").sort_values("订单数", ascending=False)
-    report_tables["流向统计"] = flow
+# 10. 起点终点流向分析（归一化后）
+flow = df.groupby(["起点归一", "终点归一"]).size().reset_index(name="订单数").sort_values("订单数", ascending=False)
+report_tables["流向统计"] = flow
 
 # 11. 业务类型对比 (始终生成，如果无差异则为空表)
 if "订单类型" in df.columns:
@@ -254,7 +313,7 @@ report_tables["业务类型对比"] = df_diff
 # 12. 明细全表
 report_tables["明细全表"] = df
 
-# ——— 4. 输出美化Excel，多sheet自动列宽和表格样式 ———
+# ===== 输出Excel，多sheet自动列宽和表格样式 =====
 with pd.ExcelWriter(XLSX_OUT, engine="openpyxl", mode="w") as writer:
     for name, table in report_tables.items():
         table.to_excel(writer, index=False, sheet_name=name[:31])
