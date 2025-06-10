@@ -139,16 +139,71 @@ def chart_late(df):
 
 # 8. 流向统计 (Sankey)
 
-def chart_flow(df):
-    nodes = list(set(df['起点归一']).union(df['终点归一']))
-    node_list = [{"name": n} for n in nodes]
-    links = df.rename(columns={'起点归一':'source','终点归一':'target','订单数':'value'})[['source','target','value']].to_dict(orient='records')
+def chart_flow(df, min_value: int = 3) -> None:
+    """
+    绘制 Sankey 流向图
+    ----------
+    Parameters
+    ----------
+    df : DataFrame
+        必须含列【起点归一, 终点归一, 订单数】
+    min_value : int, default=3
+        过滤阈值，保留 value ≥ min_value 的流向，避免节点爆炸
+    """
+    src, tgt, val = '起点归一', '终点归一', '订单数'
+
+    # 1️⃣ 清洗 & 去除自循环
+    flow = (df[[src, tgt, val]]
+            .dropna()
+            .assign(**{
+                src: lambda d: d[src].astype(str).str.strip(),
+                tgt: lambda d: d[tgt].astype(str).str.strip(),
+                val: lambda d: pd.to_numeric(d[val], errors='coerce')
+            })
+            .dropna()
+            .loc[lambda d: d[src] != d[tgt]]         # 去自循环
+            .groupby([src, tgt], as_index=False)[val]
+            .sum()
+            .loc[lambda d: d[val] >= min_value])     # 过滤小流量
+
+    if flow.empty:
+        print('>>> 流向统计：无有效数据，跳过绘图')
+        return
+
+    # 2️⃣ 构造节点 & 链接
+    nodes = [{'name': n} for n in { *flow[src], *flow[tgt] }]
+    links = flow.rename(columns={src: 'source', tgt: 'target'})[['source', 'target', val]] \
+                .to_dict(orient='records')
+
+    # 3️⃣ 绘制 Sankey
     sankey = (
-        Sankey()
-        .add("", node_list, links, linestyle_opt=opts.LineStyleOpts(curve=0.5), label_opts=opts.LabelOpts(position="right"))
-        .set_global_opts(title_opts=opts.TitleOpts(title="流向统计"))
+        Sankey(init_opts=opts.InitOpts(width='1200px', height='600px'))
+        .add(
+            series_name='流向',
+            nodes=nodes,
+            links=links,
+            orient='horizontal',
+            node_align='left',
+            node_width=28,
+            node_gap=14,
+            linestyle_opt=opts.LineStyleOpts(
+                color='source',            # 线条颜色继承 source 节点
+                opacity=0.8,
+                width=2,
+                curve=0.45
+            ),
+            label_opts=opts.LabelOpts(position='right', font_size=12)
+        )
+        .set_global_opts(
+            title_opts=opts.TitleOpts(title='流向统计', pos_left='center'),
+            tooltip_opts=opts.TooltipOpts(trigger='item', formatter='{b}: {c}')
+        )
     )
-    save_chart(sankey, "流向统计")
+    save_chart(sankey, '流向统计')
+
+
+
+
 
 # 9. 业务类型对比 (Sankey)
 
