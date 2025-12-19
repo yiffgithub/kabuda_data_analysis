@@ -1,1 +1,4 @@
 # kabuda_data_analysis
+As a Data Analyst, I led the restructuring of a legacy database by building a three-stage Python ETL pipeline (regex cleaning, standardized normalization, and LLM-assisted refinement), enabling automated reporting and advanced visualization for strategic pricing and operational decisions. Through systematic KPI analysis, I identified regional supply–demand imbalances and proposed a Driver Hub + Pre-Scheduling model to enhance efficiency. I further designed a full RFM-based customer value system with a three-tier MySQL architecture, automated scoring engine, and executive dashboards, ultimately identifying top-value customers, increasing ROI by ~25%, and reducing churn by ~40%.
+
+作为数据分析师（合同制），我主导重构了公司原有的遗留数据库，构建了三阶段 Python ETL 流程（正则清洗、规则化标准化与 LLM 辅助优化），实现自动化报表与高级可视化分析，直接支持定价与运营决策。通过系统化 KPI 分析，识别了区域供需失衡问题，并提出“司机枢纽 + 预调度”模型以提升运营效率。同时设计并实现完整的 RFM 客户价值分析体系，结合三层 MySQL 架构、自动化评分引擎与管理可视化决策报表，最终识别顶级高价值客户，将 ROI 提升约 25%，并将客户流失率降低约 40%。
